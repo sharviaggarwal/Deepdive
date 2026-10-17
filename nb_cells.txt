@@ -1,0 +1,346 @@
+### CELL 0 ###
+!pip install youtube-transcript-api
+!pip install sentence-transformers
+!pip install pyannote.audio
+!pip install pydantic
+
+### CELL 1 ###
+!pip install -u ollama
+!pip install chromadb
+
+### CELL 2 ###
+!ollama pull llama3.1:8b
+
+### CELL 3 ###
+!ollama list
+
+### CELL 4 ###
+import ollama
+
+response = ollama.chat(
+    model="llama3.1:8b",
+    messages=[
+        {
+            "role": "user",
+            "content": "Hello!"
+        }
+    ],
+    options={
+        "num_gpu": 0
+    }
+)
+
+print(response["message"]["content"])
+
+### CELL 5 ###
+from pathlib import Path
+import os
+import json
+project_name= "pingu"
+model_name= "llama3.1:8b"
+model_folder = model_name.replace(":", "-")
+
+project_path = Path(os.getcwd()) / project_name
+base_path = Path(os.getcwd()) / project_name / model_folder
+data_path = Path(os.getcwd()) / project_name / model_folder / "data"
+notes= Path(os.getcwd()) / project_name / model_folder / "notes"
+transcripts= Path(os.getcwd()) / project_name / model_folder / "transcripts"
+for directory in [data_path, notes, transcripts]:
+    directory.mkdir(parents=True, exist_ok=True)
+config = {
+    "project_name": project_name,
+    "model_name": model_name,
+    "project_path": str(project_path),
+    "base_path": str(base_path),
+    "data_path": str(data_path),
+    "notes": str(notes),
+    "transcripts": str(transcripts)
+}
+config_path = base_path / "config.json"
+with open(config_path, "w") as f:
+    json.dump(config, f, indent=4)
+    print(f"Configuration saved to {config_path}")
+    print(f"Project structure created at {project_path}")
+
+
+### CELL 6 ###
+response = ollama.chat(
+    model="llama3.1:8b",
+    messages=[
+        {
+            "role": "user",
+            "content": "Return a JSON object with one key called summary and give a very short summary of AI."
+        }
+    ],
+    options={
+        "num_gpu": 0,
+        "num_predict": 100
+    },
+    format="json"
+)
+
+print(response["message"]["content"])
+
+### CELL 7 ###
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
+
+proxy_url = "https://youtu.be/AUxCcmXJJzw?si=yZzfJwagHd-cuMuM"
+
+api = YouTubeTranscriptApi(
+    proxy_config=GenericProxyConfig(
+        http_url=proxy_url,
+        https_url=proxy_url,
+    )
+)
+
+transcript = api.fetch(video_id)
+print("Transcript fetched successfully!")
+print("Number of transcript entries:", len(transcript))
+
+### CELL 8 ###
+import re
+segments = []
+
+for item in transcript:
+    segments.append({
+        "start": float(item.start),
+        "end": float(item.start + item.duration),
+        "text": re.sub(r"\s+", " ", item.text).strip()
+    })
+
+print("Total segments:", len(segments))
+print("\nFirst 3 segments:\n")
+
+for segment in segments[:3]:
+    print(segment)
+
+### CELL 9 ###
+def create_chunks(segments, max_words=150):
+    chunks = []
+    
+    current_text = []
+    current_start = None
+    current_end = None
+    word_count = 0
+
+    for segment in segments:
+        text = segment["text"]
+        words = len(text.split())
+
+        if current_start is None:
+            current_start = segment["start"]
+
+        current_text.append(text)
+        current_end = segment["end"]
+        word_count += words
+
+        if word_count >= max_words:
+            chunks.append({
+                "text": " ".join(current_text),
+                "start": current_start,
+                "end": current_end
+            })
+
+            current_text = []
+            current_start = None
+            current_end = None
+            word_count = 0
+
+    # Add remaining text
+    if current_text:
+        chunks.append({
+            "text": " ".join(current_text),
+            "start": current_start,
+            "end": current_end
+        })
+
+    return chunks
+
+
+chunks = create_chunks(segments, max_words=150)
+
+print("Total chunks:", len(chunks))
+print("\nFirst chunk:")
+print(chunks[0])
+
+### CELL 10 ###
+from sentence_transformers import SentenceTransformer
+
+print("SentenceTransformer imported successfully!")
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+print("Embedding model loaded successfully!")
+
+### CELL 11 ###
+texts = [chunk["text"] for chunk in chunks]
+
+embeddings = embedding_model.encode(
+    texts,
+    show_progress_bar=True
+)
+
+print("Number of embeddings:", len(embeddings))
+print("Embedding size:", embeddings.shape[1])
+
+### CELL 12 ###
+def format_timestamp(seconds):
+    seconds = int(seconds)
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    else:
+        return f"{minutes:02d}:{seconds:02d}"
+
+
+for chunk in chunks[:5]:
+    print(
+        format_timestamp(chunk["start"]),
+        "→",
+        format_timestamp(chunk["end"])
+    )
+    print(chunk["text"][:150])
+    print()
+
+### CELL 13 ###
+import chromadb
+chroma_client = chromadb.Client()
+
+collection = chroma_client.get_or_create_collection(
+    name="deepdive_video"
+)
+
+print("ChromaDB collection created!")
+
+### CELL 14 ###
+documents = [chunk["text"] for chunk in chunks]
+
+ids = [f"chunk_{i}" for i in range(len(chunks))]
+
+metadatas = [
+    {
+        "start": chunk["start"],
+        "end": chunk["end"]
+    }
+    for chunk in chunks
+]
+
+collection.add(
+    ids=ids,
+    documents=documents,
+    embeddings=embeddings.tolist(),
+    metadatas=metadatas
+)
+
+print("Stored", collection.count(), "chunks in ChromaDB!")
+
+### CELL 15 ###
+def retrieve_chunks(question, n_results=5):
+    
+    # Convert user's question into an embedding
+    query_embedding = embedding_model.encode(
+        [question]
+    )
+
+    # Search ChromaDB
+    results = collection.query(
+        query_embeddings=query_embedding.tolist(),
+        n_results=n_results
+    )
+
+    return results
+
+
+print("Retriever created successfully!")
+
+### CELL 16 ###
+question = "What is the main topic of this video?"
+
+results = retrieve_chunks(question)
+
+print("Retrieved chunks:", len(results["documents"][0]))
+
+for i, document in enumerate(results["documents"][0]):
+    
+    metadata = results["metadatas"][0][i]
+    
+    print("\n--- Result", i + 1, "---")
+    print(
+        "Timestamp:",
+        format_timestamp(metadata["start"]),
+        "→",
+        format_timestamp(metadata["end"])
+    )
+    print("Text:", document[:300])
+
+### CELL 17 ###
+def ask_video(question, n_results=5):
+
+    # 1. Retrieve relevant chunks
+    results = retrieve_chunks(
+        question,
+        n_results=n_results
+    )
+
+    # 2. Build context for Llama
+    context_parts = []
+
+    for i, document in enumerate(results["documents"][0]):
+
+        metadata = results["metadatas"][0][i]
+
+        start_time = format_timestamp(metadata["start"])
+        end_time = format_timestamp(metadata["end"])
+
+        context_parts.append(
+            f"""
+SOURCE {i + 1}
+TIMESTAMP: {start_time} - {end_time}
+
+{document}
+"""
+        )
+
+    context = "\n".join(context_parts)
+
+    # 3. Ask Llama using only retrieved context
+    prompt = f"""
+You are DeepDive, an AI assistant that answers questions
+about a video.
+
+Answer the user's question using ONLY the transcript
+context provided below.
+
+If the answer cannot be found in the context,
+say: "I couldn't find this information in the video."
+
+Keep the answer concise and accurate.
+
+USER QUESTION:
+{question}
+
+VIDEO CONTEXT:
+{context}
+"""
+
+    # 4. Generate answer using local Llama
+    response = ollama.chat(
+        model="llama3.1:8b",
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        options={
+            "num_gpu": 0,
+            "num_predict": 300
+        }
+    )
+
+    return response["message"]["content"], results
+
